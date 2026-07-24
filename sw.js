@@ -1,4 +1,4 @@
-const CACHE = 'english-buddy-v61';
+const CACHE = 'english-buddy-v67';
 const ASSETS = ['./', './index.html', './icon-180.png', './icon-512.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
