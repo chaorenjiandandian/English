@@ -15,9 +15,30 @@
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="manifest" href="manifest.webmanifest">
 <script>
-/* offline support: register service worker when served over http(s); harmless when opened as a local file */
+/* offline support: register service worker when served over http(s); then silent full-asset precache */
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-  addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(()=>{}));
+  addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').then(reg => {
+      // kick background precache once SW is ready (does not block UI)
+      if (navigator.serviceWorker.ready) {
+        navigator.serviceWorker.ready.then(() => {
+          setTimeout(() => { try { startSilentAssetPrecache(); } catch (e) {} }, 2500);
+        });
+      }
+      // if a new SW is waiting, activate it on next load quietly
+      if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+      reg.addEventListener('updatefound', () => {
+        const w = reg.installing;
+        if (!w) return;
+        w.addEventListener('statechange', () => {
+          if (w.state === 'installed' && navigator.serviceWorker.controller) {
+            // new version ready — next visit picks it up; optionally skip waiting
+            w.postMessage({ type: 'SKIP_WAITING' });
+          }
+        });
+      });
+    }).catch(()=>{});
+  });
 }
 </script>
 <title>英语小伙伴 · English Buddy</title>
@@ -1116,7 +1137,17 @@ const FEATURES = {
 const PRAISES_ZH = ['Great job!','Awesome!','Well done!','Super!','You did it!','Keep going!'];
 const CHEER_EMOJI = ['🎉','🌟','🏆','🎈','👏','💖'];
 const STREAK_N = 3;   // kept for parent settings compatibility
-const QUIET_LEARN = true; // 学习过程中不弹鼓励/彩带，减少干扰
+const QUIET_LEARN = true; // 学习过程中不弹鼓励/彩带/自动小测，减少干扰
+
+/* hard silence: clear any leftover celebrate UI if cached old behavior left classes */
+function silenceCelebrateUI(){
+  ['praise','cheer','badgePop','fireworksOverlay','overlay'].forEach(id=>{
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('show');
+  });
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', silenceCelebrateUI);
+else silenceCelebrateUI();
 
 /* ================= STATE ================= */
 let stars = 0, wordsTapped = 0, gamesDone = 0, correctStreak = 0;
@@ -1568,6 +1599,7 @@ function praise(){
 }
 /* confetti explodes from screen center outward; wide=reach multiplier */
 function confetti(n=24, wide=1){
+  if (typeof QUIET_LEARN !== 'undefined' && QUIET_LEARN) return; // 安静模式：不撒彩带
   const emojis = ['⭐','🌟','✨','💛','🎈'];
   for(let i=0;i<n;i++){
     const s = document.createElement('span');
@@ -1603,6 +1635,7 @@ function playSwoop(){
   o.start(t); o.stop(t+0.45);
 }
 function playChime(big){
+  if (typeof QUIET_LEARN !== 'undefined' && QUIET_LEARN) return; // 安静模式：不播庆祝音
   if (!ensureAudio()) return;
   if (big) playSwoop();
   const notes = big ? ['C5','E5','G5','C6','E6'] : ['C5','E5','G5'];
@@ -1611,6 +1644,7 @@ function playChime(big){
 }
 /* fun celebration jingle: whoosh → confetti pops (synced with waves) → arpeggio → ta-da chord → twinkles */
 function playCelebrationSound(){
+  if (typeof QUIET_LEARN !== 'undefined' && QUIET_LEARN) return;
   if (!ensureAudio()) return;
   playSwoop();                                                          // 咻~
   [0, 0.3, 0.65].forEach(d=>noiseBurst(d, 0.09, 0.45, 1400, 0.9));      // 彩带爆开 啵!啵!啵!
@@ -1641,7 +1675,9 @@ function rewardCorrect(){
   else { praise(); confetti(6, 0.7); playChime(false); }
 }
 /* full-screen confetti every N taps in core learning flow; N configurable by parents */
-let rewardN = storeGet('eb-rewardN') !== null ? parseInt(storeGet('eb-rewardN')) : 0;   // 默认关闭：减少过程干扰
+let rewardN = (typeof QUIET_LEARN !== 'undefined' && QUIET_LEARN)
+  ? 0
+  : (storeGet('eb-rewardN') !== null ? parseInt(storeGet('eb-rewardN')) : 0);   // 安静模式强制关闭「学了N个」
 /* wait for the current pronunciation to finish (≈450ms of silence) before celebrating */
 let celebrateWaiter = null;
 function celebrateAfterSpeech(fn){
@@ -1772,7 +1808,9 @@ function imgTag(src, alt){
   return `<img src="${src}" alt="${alt||''}" draggable="false" decoding="async" loading="eager" fetchpriority="high">`;
 }
 let curTheme = null, flashIdx = 0, themeViewed = new Set(), themeQuizDone = false, autoQuizTimer = null;
-let autoQuiz = storeGet('eb-autoQuiz') === '1';   // 自动小挑战，默认关闭
+let autoQuiz = (typeof QUIET_LEARN !== 'undefined' && QUIET_LEARN)
+  ? false
+  : (storeGet('eb-autoQuiz') === '1');   // 安静模式：不自动小测打断
 function openTheme(t){
   curTheme = t; flashIdx = 0; themeViewed = new Set(); themeQuizDone = false;
   clearTimeout(autoQuizTimer);
@@ -1800,7 +1838,8 @@ function renderFlash(){
   themeViewed.add(flashIdx);
   document.getElementById('quizBtn').style.display = (themeViewed.size >= t.words.length) ? 'inline-block' : 'none';
   // auto quiz: after 7 cards (or the whole theme if smaller), pop 3 listen-and-touch questions
-  if (autoQuiz && !themeQuizDone && themeViewed.size >= Math.min(7, t.words.length)){
+  // 安静模式：不自动打断翻卡学习
+  if (!(typeof QUIET_LEARN !== 'undefined' && QUIET_LEARN) && autoQuiz && !themeQuizDone && themeViewed.size >= Math.min(7, t.words.length)){
     themeQuizDone = true;
     clearTimeout(autoQuizTimer);
     autoQuizTimer = setTimeout(()=>{
@@ -2344,8 +2383,8 @@ function startQuiz(fromViewed){
 }
 function nextQuizRound(){
   if (quizRound >= quizWords.length){
-    bigCelebrate();
-    setTimeout(()=>{ go('words'); }, 2700);
+    if (!(typeof QUIET_LEARN !== 'undefined' && QUIET_LEARN)) bigCelebrate();
+    setTimeout(()=>{ go('words'); }, (typeof QUIET_LEARN !== 'undefined' && QUIET_LEARN) ? 400 : 2700);
     return;
   }
   quizAnswer = quizWords[quizRound];
@@ -3016,6 +3055,7 @@ rewardCorrect = function(){
 };
 
 function launchFireworks(){
+  if (typeof QUIET_LEARN !== 'undefined' && QUIET_LEARN) return;
   const overlay = document.getElementById('fireworksOverlay');
   const colors = ['#ff8c42','#e85d75','#3aa0e0','#43b85c','#f5a623','#7b68d9','#FFD700','#ff69b4'];
   for (let fw = 0; fw < 5; fw++){
@@ -3058,7 +3098,8 @@ function checkDinoUnlock(){
   const unlocked = storeGet('eb-dino-unlocked') === '1';
   if (streak >= 7 && !unlocked){
     storeSet('eb-dino-unlocked', '1');
-    // Show unlock celebration
+    // 安静模式：只静默解锁，不弹「太棒了」
+    if (typeof QUIET_LEARN !== 'undefined' && QUIET_LEARN) return;
     setTimeout(() => {
       const overlay = document.getElementById('overlayCard');
       overlay.innerHTML = `<div style="text-align:center;padding:30px">
@@ -3323,9 +3364,8 @@ renderFlash = function(){
   _origRenderFlash();
   // Add recording button
   if (FEATURES.recording) initRecButton();
-  // Check if theme complete → offer coloring
-  if (FEATURES.coloring && curTheme && themeViewed.size >= curTheme.words.length && !themeQuizDone){
-    // Show coloring after a short delay
+  // Check if theme complete → offer coloring（安静模式不自动弹出）
+  if (!(typeof QUIET_LEARN !== 'undefined' && QUIET_LEARN) && FEATURES.coloring && curTheme && themeViewed.size >= curTheme.words.length && !themeQuizDone){
     setTimeout(() => {
       if (document.getElementById('words').classList.contains('active') && curTheme){
         const lastWord = curTheme.words[curTheme.words.length - 1];
@@ -3458,6 +3498,90 @@ document.addEventListener('mouseover', function(e){
     if (src) { const a = new Audio(); a.preload = 'auto'; a.src = src; }
   }
 }, {passive:true});
+
+/* ===== Silent full-asset precache (PWA background) ===== */
+const PRECACHE_MARK = 'eb-precache-v87';
+let _precacheRunning = false;
+function collectAssetUrlsFromData(){
+  const urls = new Set();
+  try {
+    if (typeof PHOTOS === 'object' && PHOTOS) {
+      Object.values(PHOTOS).forEach(v => {
+        if (typeof v === 'string' && v.indexOf('assets/') === 0) urls.add('./' + v.replace(/^\.\//, ''));
+      });
+    }
+    if (typeof SENT_PHOTOS === 'object' && SENT_PHOTOS) {
+      Object.values(SENT_PHOTOS).forEach(v => {
+        if (typeof v === 'string' && v.indexOf('assets/') === 0) urls.add('./' + v.replace(/^\.\//, ''));
+      });
+    }
+    if (typeof SONG_AUDIO === 'object' && SONG_AUDIO) {
+      Object.values(SONG_AUDIO).forEach(v => {
+        if (typeof v === 'string' && v.indexOf('assets/') === 0) urls.add('./' + v.replace(/^\.\//, ''));
+      });
+    }
+  } catch (e) {}
+  return Array.from(urls);
+}
+async function startSilentAssetPrecache(){
+  if (_precacheRunning) return;
+  if (!('serviceWorker' in navigator) || !location.protocol.startsWith('http')) return;
+  try { if (localStorage.getItem(PRECACHE_MARK) === 'done') return; } catch (e) {}
+  _precacheRunning = true;
+  try {
+    let urls = [];
+    try {
+      const res = await fetch('./asset-manifest.json', { cache: 'no-cache' });
+      if (res.ok) {
+        const j = await res.json();
+        if (j && Array.isArray(j.files)) urls = j.files.map(f => './' + String(f).replace(/^\.\//, ''));
+      }
+    } catch (e) {}
+    if (!urls.length) urls = collectAssetUrlsFromData();
+    urls = Array.from(new Set(urls));
+    if (!urls.length) { _precacheRunning = false; return; }
+
+    const reg = await navigator.serviceWorker.ready;
+    const worker = reg.active || navigator.serviceWorker.controller;
+    if (worker) {
+      worker.postMessage({ type: 'PRECACHE_URLS', urls, batchSize: 6 });
+    } else {
+      let i = 0;
+      const batch = 4;
+      const tick = async () => {
+        if (i >= urls.length) {
+          try { localStorage.setItem(PRECACHE_MARK, 'done'); } catch (e) {}
+          _precacheRunning = false;
+          return;
+        }
+        const slice = urls.slice(i, i + batch);
+        i += batch;
+        await Promise.all(slice.map(u => fetch(u, { credentials: 'same-origin' }).catch(() => null)));
+        setTimeout(tick, 80);
+      };
+      tick();
+      return;
+    }
+    const onMsg = (ev) => {
+      const d = ev.data || {};
+      if (d.type !== 'PRECACHE_PROGRESS') return;
+      if (d.complete) {
+        try { localStorage.setItem(PRECACHE_MARK, 'done'); } catch (e) {}
+        navigator.serviceWorker.removeEventListener('message', onMsg);
+        _precacheRunning = false;
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', onMsg);
+    setTimeout(() => {
+      try { localStorage.setItem(PRECACHE_MARK, 'done'); } catch (e) {}
+      _precacheRunning = false;
+      navigator.serviceWorker.removeEventListener('message', onMsg);
+    }, 15 * 60 * 1000);
+  } catch (e) {
+    _precacheRunning = false;
+  }
+}
+window.startSilentAssetPrecache = startSilentAssetPrecache;
 </script>
 
 <script>
