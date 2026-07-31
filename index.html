@@ -4,6 +4,9 @@
   <link rel="preload" href="sw.js" as="script">
   <link rel="preload" href="data.js" as="script">
   <link rel="dns-prefetch" href="https://dict.youdao.com">
+  <link rel="dns-prefetch" href="https://translate.google.com">
+  <link rel="preconnect" href="https://dict.youdao.com" crossorigin>
+  <link rel="preconnect" href="https://translate.google.com" crossorigin>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
 <!-- iOS "添加到主屏幕" 全屏应用模式 -->
@@ -950,8 +953,20 @@ display:flex;flex-direction:column;align-items:center;justify-content:center;z-i
   <div class="parent-box">
     <h3>🗣️ 发音设置</h3>
     <div class="accent-row">
-      <button class="accent-btn engine-btn" data-eng="youdao" onclick="setEngine('youdao')">🌐 在线真人发音<span>有道词典 · 免费</span></button>
+      <button class="accent-btn engine-btn" data-eng="google" onclick="setEngine('google')">✨ 谷歌朗读<span>免费 · 音量更稳</span></button>
+      <button class="accent-btn engine-btn" data-eng="youdao" onclick="setEngine('youdao')">🌐 有道真人<span>免费 · 词典音</span></button>
       <button class="accent-btn engine-btn" data-eng="local" onclick="setEngine('local')">📱 本机语音<span>离线可用</span></button>
+    </div>
+    <p id="engineNote" style="margin-top:10px;font-size:13px;color:#8a7a6a;line-height:1.55"></p>
+    <div style="margin-top:12px;padding:12px 14px;background:#f4efe6;border-radius:16px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px">
+        <span style="font-size:14px;font-weight:700;color:#5b4a3f">🔊 朗读音量</span>
+        <span id="volVal" style="font-size:14px;font-weight:800;color:#ff8c42">90%</span>
+      </div>
+      <input id="volSlider" type="range" min="30" max="140" step="5" value="90"
+        oninput="setSpeechVolume(this.value/100)"
+        style="width:100%;accent-color:#ff8c42">
+      <div style="font-size:12px;color:#a2907e;margin-top:6px">统一控制在线/本机音量（30%–140%）。在线引擎失败会自动回退本机语音</div>
     </div>
     <div class="accent-row" id="accentRow" style="margin-top:10px">
       <button class="accent-btn" data-acc="GB" onclick="setAccent('GB')">🇬🇧 英式<span>British</span></button>
@@ -1348,23 +1363,86 @@ if ('speechSynthesis' in window){
   pickVoice();
   speechSynthesis.onvoiceschanged = pickVoice;
 }
-/* ===== dual pronunciation engines =====
-   'local'  : device Web Speech voices (offline, supports GB/US/AU + singing)
-   'youdao' : Youdao dictvoice online API (free, no key, human-quality; type=1 UK / type=2 US) */
-let voiceEngine = storeGet('eb-engine') || 'youdao';   // default: online human-quality voice
+/* ===== multi pronunciation engines =====
+   'google' : Google Translate TTS (free, no key, steadier loudness; words + short phrases)
+   'youdao' : Youdao dictvoice (free, no key, dictionary human voice; words + short phrases)
+   'local'  : device Web Speech voices (offline, GB/US/AU + voice picker) */
+let voiceEngine = storeGet('eb-engine') || 'google';   // default: steadier free online voice
+const ENGINE_OK = new Set(['google','youdao','local']);
+if (!ENGINE_OK.has(voiceEngine)) voiceEngine = 'google';
 let onlineAudio = null;
 let ydWatch = null;
+let speechVolume = (()=>{
+  const v = parseFloat(storeGet('eb-vol'));
+  return isFinite(v) ? Math.max(0.3, Math.min(1.4, v)) : 0.9;
+})();
 
-/* single reusable player: once unlocked by a user tap, iOS allows follow-up plays
-   (fixes silent second-half of letter cards and quick swipes on iPhone) */
+/* WebAudio graph: gain + compressor so online clips are less peaky/quiet */
+let speechCtx = null, speechGain = null, speechComp = null, speechSrcBound = false;
+function ensureSpeechGraph(){
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  if (!speechCtx){
+    speechCtx = new AC();
+    speechGain = speechCtx.createGain();
+    speechGain.gain.value = speechVolume;
+    speechComp = speechCtx.createDynamicsCompressor();
+    try {
+      speechComp.threshold.setValueAtTime(-26, speechCtx.currentTime);
+      speechComp.knee.setValueAtTime(22, speechCtx.currentTime);
+      speechComp.ratio.setValueAtTime(8, speechCtx.currentTime);
+      speechComp.attack.setValueAtTime(0.004, speechCtx.currentTime);
+      speechComp.release.setValueAtTime(0.22, speechCtx.currentTime);
+    } catch(e){}
+    speechGain.connect(speechComp);
+    speechComp.connect(speechCtx.destination);
+  }
+  if (speechCtx.state === 'suspended'){
+    try { speechCtx.resume(); } catch(e){}
+  }
+  return speechCtx;
+}
+function setSpeechVolume(v){
+  speechVolume = Math.max(0.3, Math.min(1.4, +v || 0.9));
+  storeSet('eb-vol', String(speechVolume));
+  if (speechGain){
+    try { speechGain.gain.setTargetAtTime(speechVolume, (speechCtx && speechCtx.currentTime) || 0, 0.02); }
+    catch(e){ speechGain.gain.value = speechVolume; }
+  }
+  if (onlineAudio){ try { onlineAudio.volume = Math.min(1, speechVolume); } catch(e){} }
+  const lab = document.getElementById('volVal');
+  if (lab) lab.textContent = Math.round(speechVolume * 100) + '%';
+  const sl = document.getElementById('volSlider');
+  if (sl) sl.value = String(Math.round(speechVolume * 100));
+}
+function refreshVolumeUI(){
+  const lab = document.getElementById('volVal');
+  if (lab) lab.textContent = Math.round(speechVolume * 100) + '%';
+  const sl = document.getElementById('volSlider');
+  if (sl) sl.value = String(Math.round(speechVolume * 100));
+}
+
+/* single reusable player: once unlocked by a user tap, iOS allows follow-up plays */
 let ydPlayer = null;
 function ydEnsurePlayer(){
-  if (!ydPlayer){ ydPlayer = new Audio(); ydPlayer.preload = 'auto'; }
+  if (!ydPlayer){
+    ydPlayer = new Audio();
+    ydPlayer.preload = 'auto';
+    // do NOT set crossOrigin: third-party TTS (Youdao/Google) often lacks CORS,
+    // and anonymous mode can silence playback on iOS/Chrome.
+  }
   return ydPlayer;
+}
+function bindPlayerGraph(a){
+  // WebAudio MediaElementSource requires CORS for remote TTS; skip to keep audio reliable.
+  // Volume is controlled via element.volume + speechVolume.
+  return;
 }
 document.addEventListener('pointerdown', function ydUnlock(){
   try {
+    ensureSpeechGraph();
     const a = ydEnsurePlayer();
+    bindPlayerGraph(a);
     a.muted = true;
     a.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
     a.play().catch(()=>{});
@@ -1387,7 +1465,7 @@ function buildU(text, opts={}){
   const sm = slowMode ? 0.8125 : 1;
   u.rate = Math.max(0.5, (opts.rate || 0.8) * sm);
   u.pitch = opts.pitch !== undefined ? opts.pitch : 1.12;
-  u.volume = 1;
+  u.volume = Math.max(0, Math.min(1, speechVolume));
   return u;
 }
 /* full speech lifecycle: cancel → speak with watchdog retry → max timeout → rAF settle.
@@ -1428,19 +1506,33 @@ function speakGuarded(text, opts, onend){
 function speakLocal(text, rate=0.8, onend=null){
   speakGuarded(text, { rate, pitch: 1.12 }, onend);
 }
-function speakYoudao(text, rate=0.8, onend=null){
+
+function onlineLangCode(){
+  // Google/Youdao-facing lang codes
+  if (accentPref === 'GB') return { google: 'en-GB', youdao: 1 };
+  if (accentPref === 'AU') return { google: 'en-AU', youdao: 1 }; // AU → closest UK on Youdao
+  return { google: 'en-US', youdao: 2 };
+}
+function clipForOnline(text){
+  // keep requests short; long lines fall back to local
+  const t = String(text || '').trim();
+  if (!t) return '';
+  if (t.length > 160) return '';
+  return t;
+}
+function playOnlineSrc(src, rate, onend, onfail){
   stopAllSpeech();
-  const type = accentPref === 'US' ? 2 : 1;      // Youdao: 1 = British, 2 = American
   const a = ydEnsurePlayer();
-  const wantRate = Math.max(0.6, Math.min(1.2, rate + 0.2)) * (slowMode ? 0.65 : 1);
+  bindPlayerGraph(a);
+  const wantRate = Math.max(0.55, Math.min(1.25, (rate || 0.8) + 0.15)) * (slowMode ? 0.65 : 1);
   let fellBack = false, done = false;
-  const fallback = ()=>{
+  const doFail = ()=>{
     if (fellBack || done) return;
     fellBack = true;
     clearTimeout(ydWatch);
     try { a.pause(); } catch(e){}
     document.body.classList.remove('tts');
-    setTimeout(()=>speakLocal(text, rate, onend), 50);
+    if (typeof onfail === 'function') onfail();
   };
   const finish = ()=>{
     if (done || fellBack) return;
@@ -1449,44 +1541,71 @@ function speakYoudao(text, rate=0.8, onend=null){
     document.body.classList.remove('tts');
     if (onend) onend();
   };
-  a.muted = false; a.volume = 1;
+  a.muted = false;
+  // element volume still matters if WebAudio graph failed to bind
+  a.volume = Math.min(1, Math.max(0.2, speechVolume));
   a.onended = finish;
-  a.onerror = fallback;
-  a.onplaying = ()=>{ a.playbackRate = wantRate; };
-  a.src = 'https://dict.youdao.com/dictvoice?le=eng&audio=' + encodeURIComponent(text) + '&type=' + type;
-  a.playbackRate = wantRate; a.defaultPlaybackRate = wantRate;
+  a.onerror = doFail;
+  a.onplaying = ()=>{ try { a.playbackRate = wantRate; } catch(e){} };
+  a.src = src;
+  a.playbackRate = wantRate;
+  a.defaultPlaybackRate = wantRate;
   document.body.classList.add('tts');
   onlineAudio = a;
-  a.play().catch(fallback);
-  // smart watchdog: distinguish "still downloading" from "really failed"
+  a.play().catch(doFail);
   let extended = false;
   const check = ()=>{
     if (done || fellBack) return;
-    if (a.currentTime > 0 && !a.paused) return;                        // playing fine
-    if (!extended && (a.readyState >= 1 || a.networkState === 2)){     // still loading → give it more time
+    if (a.currentTime > 0 && !a.paused) return;
+    if (!extended && (a.readyState >= 1 || a.networkState === 2)){
       extended = true;
       clearTimeout(ydWatch);
       ydWatch = setTimeout(check, 3500);
       return;
     }
-    fallback();
+    doFail();
   };
   clearTimeout(ydWatch);
-  ydWatch = setTimeout(check, 1600);
+  ydWatch = setTimeout(check, 1800);
+}
+function speakYoudao(text, rate=0.8, onend=null){
+  const t = clipForOnline(text);
+  if (!t){ speakLocal(text, rate, onend); return; }
+  const type = onlineLangCode().youdao;
+  const src = 'https://dict.youdao.com/dictvoice?le=eng&audio=' + encodeURIComponent(t) + '&type=' + type;
+  playOnlineSrc(src, rate, onend, ()=> setTimeout(()=>speakLocal(text, rate, onend), 40));
+}
+function speakGoogle(text, rate=0.8, onend=null){
+  const t = clipForOnline(text);
+  if (!t){ speakLocal(text, rate, onend); return; }
+  const tl = onlineLangCode().google;
+  // client=tw-ob is the long-lived free public endpoint used by many web apps
+  const src = 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=' +
+    encodeURIComponent(tl) + '&q=' + encodeURIComponent(t);
+  playOnlineSrc(src, rate, onend, ()=> setTimeout(()=>speakLocal(text, rate, onend), 40));
 }
 /* warm the HTTP cache for an upcoming line so it plays instantly when tapped */
 let ydWarm = null;
 function ydPrefetch(text){
   try {
-    const type = accentPref === 'US' ? 2 : 1;
+    const t = clipForOnline(text);
+    if (!t) return;
+    const codes = onlineLangCode();
     ydWarm = new Audio();
     ydWarm.preload = 'auto';
-    ydWarm.src = 'https://dict.youdao.com/dictvoice?le=eng&audio=' + encodeURIComponent(text) + '&type=' + type;
+    if (voiceEngine === 'google'){
+      ydWarm.src = 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=' +
+        encodeURIComponent(codes.google) + '&q=' + encodeURIComponent(t);
+    } else {
+      ydWarm.src = 'https://dict.youdao.com/dictvoice?le=eng&audio=' + encodeURIComponent(t) + '&type=' + codes.youdao;
+    }
   } catch(e){}
 }
 function speak(text, rate=0.8, onend=null){
-  if (voiceEngine === 'youdao' && !text.includes(' ')) speakYoudao(text, rate, onend);
-  else speakLocal(text, rate, onend);
+  if (!text){ if (onend) onend(); return; }
+  if (voiceEngine === 'google') return speakGoogle(text, rate, onend);
+  if (voiceEngine === 'youdao') return speakYoudao(text, rate, onend);
+  return speakLocal(text, rate, onend);
 }
 /* ===== bilingual read-aloud: English, then Chinese translation (parent-toggle, default off) ===== */
 let bilingual = storeGet('eb-bilingual') === '1';
@@ -1502,7 +1621,8 @@ function speakZh(text){
   if (!bilingual || !text || !('speechSynthesis' in window)) return;
   const u = new SpeechSynthesisUtterance(text);
   const zv = pickZhVoice(); if (zv) u.voice = zv;
-  u.lang = 'zh-CN'; u.rate = 0.92 * (slowMode ? 0.85 : 1); u.pitch = 1.02; u.volume = 1;
+  u.lang = 'zh-CN'; u.rate = 0.92 * (slowMode ? 0.85 : 1); u.pitch = 1.02;
+  u.volume = Math.max(0, Math.min(1, speechVolume));
   u.onstart = ()=>document.body.classList.add('tts');
   u.onend = u.onerror = ()=>document.body.classList.remove('tts');
   speechSynthesis.speak(u);
@@ -1521,11 +1641,19 @@ function setBilingual(on){
 function refreshEngineUI(){
   document.querySelectorAll('.engine-btn').forEach(b=>b.classList.toggle('on', b.dataset.eng === voiceEngine));
   const note = document.getElementById('engineNote');
-  if (note) note.textContent = voiceEngine === 'youdao'
-    ? '在线真人发音（有道词典）：音质更自然，需要联网；支持英音/美音切换（澳音会自动用英音）。断网时自动切回本机语音。'
-    : '本机语音：无需联网，支持英/美/澳三种口音，音色可在下方选择。';
+  if (note){
+    if (voiceEngine === 'google'){
+      note.textContent = '谷歌朗读（免费、无需密钥）：真人感较好、音量相对更稳，支持单词与短句；需联网。失败时自动回退本机语音。澳式口音会用 en-AU。';
+    } else if (voiceEngine === 'youdao'){
+      note.textContent = '有道词典发音（免费）：词典真人音，需联网；支持英音/美音（澳式用英音）。短句也可用；失败时自动回退本机语音。';
+    } else {
+      note.textContent = '本机语音：无需联网，支持英/美/澳口音，可在下方选择系统音色。不同设备音色差异较大。';
+    }
+  }
+  refreshVolumeUI();
 }
 function setEngine(eng){
+  if (!ENGINE_OK.has(eng)) eng = 'google';
   voiceEngine = eng;
   storeSet('eb-engine', eng);
   refreshEngineUI();
@@ -2298,7 +2426,7 @@ function renderSent(){
   card.classList.remove('slide','slideL'); void card.offsetWidth;
   card.classList.add(lastDir < 0 ? 'slideL' : 'slide');
   speakSentence();
-  if (voiceEngine === 'youdao'){       // preload the next line so it starts instantly
+  if (voiceEngine === 'youdao' || voiceEngine === 'google'){
     const next = curSet.items[(sentIdx + 1) % curSet.items.length];
     if (next) ydPrefetch(next.s);
   }
@@ -2316,8 +2444,9 @@ function speakSentence(){
   const it = curSet.items[sentIdx];
   const spans = [...document.querySelectorAll('#sentEn .w')];
   spans.forEach(sp=>sp.classList.remove('hl'));
-  if (voiceEngine === 'youdao'){          // online engine: use local TTS for full sentences (Youdao only handles single words)
-    speakLocal(it.s, 0.72, ()=>{ if (bilingual) setTimeout(()=>speakZh(it.zh), 200); });
+  // online free engines: whole-phrase audio (no word boundary events)
+  if (voiceEngine === 'youdao' || voiceEngine === 'google'){
+    speak(it.s, 0.72, ()=>{ if (bilingual) setTimeout(()=>speakZh(it.zh), 200); });
     wordsTapped++; recBump('sents');
     tapProgress();
     return;
@@ -2764,6 +2893,7 @@ function showParent(){
   }
   buildVoiceList();
   refreshEngineUI();
+  refreshVolumeUI();
   document.querySelectorAll('.rn-btn').forEach(b=>b.classList.toggle('on', +b.dataset.n === rewardN));
   document.querySelectorAll('.aq-btn').forEach(b=>b.classList.toggle('on', (b.dataset.aq === '1') === autoQuiz));
   document.querySelectorAll('.lm-btn').forEach(b=>b.classList.toggle('on', (b.dataset.lm === '1') === levelMode));

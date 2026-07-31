@@ -1,5 +1,5 @@
 /* English Buddy SW — shell precache + background full-asset fill */
-const CACHE = 'english-buddy-v98';
+const CACHE = 'english-buddy-v99';
 const SHELL = [
   './',
   './index.html',
