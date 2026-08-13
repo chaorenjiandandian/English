@@ -25,7 +25,9 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
       // kick background precache once SW is ready (does not block UI)
       if (navigator.serviceWorker.ready) {
         navigator.serviceWorker.ready.then(() => {
-          setTimeout(() => { try { startSilentAssetPrecache(); } catch (e) {} }, 2500);
+          // setTimeout(() => { try { startSilentAssetPrecache(); } catch (e) {} }, 2500);
+          // ^ Disabled: full-asset background precache saturated slow connections (esp. WeChat + GH Pages in mainland China).
+          //   SW cache-first on visited assets is sufficient for offline/repeat visits.
         });
       }
       // if a new SW is waiting, activate it on next load quietly
